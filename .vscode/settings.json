@@ -1,8 +1,0 @@
-{
-    "[rust]": {
-        "editor.defaultFormatter": "rust-lang.rust"
-    },
-    "rust-client.channel": "stable",
-    "editor.formatOnSave": true,
-    "editor.formatOnType": true,
-}
