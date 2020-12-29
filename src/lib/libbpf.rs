@@ -1,7 +1,7 @@
 extern crate elf;
 use std::path::PathBuf;
 
-struct bpf {}
+struct Bpf {}
 
 pub fn new_bpf(path: &str) {
     println!("path is {}!", path);
@@ -14,7 +14,9 @@ pub fn new_bpf(path: &str) {
 }
 
 fn load(f: elf::File) {
-    f.sections
+    for val in f.sections.iter() {
+        println!("val is {}!", val);
+    }
 }
 
 pub fn bpf_attach_kprobe() {
