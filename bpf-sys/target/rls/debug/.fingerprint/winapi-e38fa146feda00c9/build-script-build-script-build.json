@@ -1,0 +1,1 @@
+{"rustc":5115962679530443550,"features":"[\"errhandlingapi\", \"libloaderapi\", \"winerror\"]","target":10088282520713642473,"profile":6299028598154287785,"path":10434582303130145765,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"debug\\.fingerprint\\winapi-e38fa146feda00c9\\dep-build-script-build-script-build"}}],"rustflags":[],"metadata":16266002775178098827,"config":0}
