@@ -20,7 +20,8 @@
 BPF_PERF_OUTPUT(skb_events);
 BPF_HASH(packet_cnt, u64, long, 256);
 
-__attribute__((section(".bpf.fn.packet_monitor"))) int packet_monitor(struct __sk_buff *skb)
+__attribute__((section(".bpf.fn.packet_monitor"))) 
+int packet_monitor(struct __sk_buff *skb)
 {
 
     u8 *cursor = 0;
