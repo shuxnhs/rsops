@@ -212,6 +212,7 @@ dependencies = [
  "bpf-sys",
  "elf",
  "goblin",
+ "zero",
 ]
 
 [[package]]
