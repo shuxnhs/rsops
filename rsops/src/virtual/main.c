@@ -18,7 +18,34 @@
 #define IP_ICMP 1
 #define ETH_HLEN 14
 BPF_PERF_OUTPUT(skb_events);
-BPF_HASH(packet_cnt, u64, long, 256);
+
+
+//BPF_HASH(packet_cnt, u64, long, 256);
+
+
+#include <linux/types.h>
+#include <uapi/linux/bpf.h>
+
+// define the struct for the key of bpf map
+struct pair {
+  __u32 src_ip;
+  __u32 dest_ip;
+};
+
+struct stats {
+  __u64 tx_cnt; // the sending request count
+  __u64 rx_cnt; // the received request count
+  __u64 tx_bytes; // the sending request bytes
+  __u64 rx_bytes; // the sending received bytes
+};
+
+__attribute__((section("maps/packet_cnt"))) 
+struct bpf_map_def packet_cnt = {
+    .type = BPF_MAP_TYPE_HASH,
+    .key_size = sizeof(struct pair),
+    .value_size = sizeof(struct stats),
+    .max_entries = 2048,
+};
 
 __attribute__((section(".bpf.fn.packet_monitor"))) 
 int packet_monitor(struct __sk_buff *skb)
