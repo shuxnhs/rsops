@@ -264,6 +264,10 @@ impl Map {
         Map::with_map_def(name, config)
     }
 
+    pub fn lookup(ikey :i32)->&[u8]{  
+
+    }
+
     fn with_section_data(name: &str, data: &[u8], flags: u32) -> Result<Map> {
         let mut map = Map::with_map_def(
             name,
@@ -458,11 +462,11 @@ pub fn parse(path: &str) -> Result<Module> {
         println!("val is {},{:?},{:?}!", section_type, kind, name);
     }
 
-    // for rel in rels.iter() {
-    //     if programs.contains_key(&rel.target_sec_idx) {
-    //         rel.apply(&mut programs, &maps, &symtab)?;
-    //     }
-    // }
+    for rel in rels.iter() {
+        if programs.contains_key(&rel.target_sec_idx) {
+            rel.apply(&object, &mut programs, &maps, &symtab)?;
+        }
+    }
     let programs = programs.drain().map(|(_, v)| v).collect();
     // let maps = maps.drain().map(|(_, v)| v).collect();
     Ok(Module {
@@ -517,11 +521,12 @@ impl RelocationInfo {
             Some(Err(e)) => return Err(Error::Section(e.to_string())),
             None => {
                 return Err(Error::Section(format!(
-                    "Section name not found: {}",
+                    "name not found: {}",
                     sym.st_name
                 )))
             }
         };
+        println!("mapname:{}", mapname);
         let map = maps.get(mapname).ok_or(Error::Reloc)?;
 
         // the index of the instruction we need to patch
