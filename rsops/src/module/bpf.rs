@@ -4,7 +4,7 @@ use bpf_sys::{
     bpf_probe_attach_type_BPF_PROBE_RETURN, bpf_prog_type, uname,
 };
 use goblin::elf::{reloc::RelocSection, section_header as hdr, Elf, SectionHeader, Sym};
-use std::collections::HashMap as RSHashMap;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io;
@@ -59,7 +59,7 @@ impl From<::std::io::Error> for Error {
 
 pub struct Module {
     pub programs: Vec<Program>,
-    pub maps: Vec<Map>,
+    pub maps: HashMap<String, Map>, //Vec<Map>,
     pub license: String,
     pub version: u32,
 }
@@ -252,11 +252,11 @@ pub struct Map {
     section_data: bool,
 }
 
-pub struct HashMap<'a, K: Clone, V: Clone> {
-    base: &'a Map,
-    _k: PhantomData<K>,
-    _v: PhantomData<V>,
-}
+// pub struct HashMap<'a, K: Clone, V: Clone> {
+//     base: &'a Map,
+//     _k: PhantomData<K>,
+//     _v: PhantomData<V>,
+// }
 
 impl Map {
     pub fn load(name: &str, code: &[u8]) -> Result<Map> {
@@ -341,65 +341,65 @@ impl Module {
     }
 }
 
-pub struct MapIter<'a, 'b, K: Clone, V: Clone> {
-    map: &'a HashMap<'b, K, V>,
-    key: Option<K>,
-}
+// pub struct MapIter<'a, 'b, K: Clone, V: Clone> {
+//     map: &'a HashMap<'b, K, V>,
+//     key: Option<K>,
+// }
 
-impl<'base, K: Clone, V: Clone> HashMap<'base, K, V> {
-    pub fn new(base: &Map) -> Result<HashMap<K, V>> {
-        if mem::size_of::<K>() != base.config.key_size as usize
-            || mem::size_of::<V>() != base.config.value_size as usize
-        {
-            return Err(Error::Map);
-        }
+// impl<'base, K: Clone, V: Clone> HashMap<'base, K, V> {
+//     pub fn new(base: &Map) -> Result<HashMap<K, V>> {
+//         if mem::size_of::<K>() != base.config.key_size as usize
+//             || mem::size_of::<V>() != base.config.value_size as usize
+//         {
+//             return Err(Error::Map);
+//         }
 
-        Ok(HashMap {
-            base,
-            _k: PhantomData,
-            _v: PhantomData,
-        })
-    }
+//         Ok(HashMap {
+//             base,
+//             _k: PhantomData,
+//             _v: PhantomData,
+//         })
+//     }
 
-    pub fn set(&self, mut key: K, mut value: V) {
-        unsafe {
-            bpf_sys::bpf_update_elem(
-                self.base.fd,
-                &mut key as *mut _ as *mut _,
-                &mut value as *mut _ as *mut _,
-                0,
-            );
-        }
-    }
+//     pub fn set(&self, mut key: K, mut value: V) {
+//         unsafe {
+//             bpf_sys::bpf_update_elem(
+//                 self.base.fd,
+//                 &mut key as *mut _ as *mut _,
+//                 &mut value as *mut _ as *mut _,
+//                 0,
+//             );
+//         }
+//     }
 
-    pub fn get(&self, mut key: K) -> Option<V> {
-        let mut value = MaybeUninit::zeroed();
-        if unsafe {
-            bpf_sys::bpf_lookup_elem(
-                self.base.fd,
-                &mut key as *mut _ as *mut _,
-                &mut value as *mut _ as *mut _,
-            )
-        } < 0
-        {
-            return None;
-        }
-        Some(unsafe { value.assume_init() })
-    }
+//     pub fn get(&self, mut key: K) -> Option<V> {
+//         let mut value = MaybeUninit::zeroed();
+//         if unsafe {
+//             bpf_sys::bpf_lookup_elem(
+//                 self.base.fd,
+//                 &mut key as *mut _ as *mut _,
+//                 &mut value as *mut _ as *mut _,
+//             )
+//         } < 0
+//         {
+//             return None;
+//         }
+//         Some(unsafe { value.assume_init() })
+//     }
 
-    pub fn delete(&self, mut key: K) {
-        unsafe {
-            bpf_sys::bpf_delete_elem(self.base.fd, &mut key as *mut _ as *mut _);
-        }
-    }
+//     pub fn delete(&self, mut key: K) {
+//         unsafe {
+//             bpf_sys::bpf_delete_elem(self.base.fd, &mut key as *mut _ as *mut _);
+//         }
+//     }
 
-    pub fn iter<'a>(&'a self) -> MapIter<'a, '_, K, V> {
-        MapIter {
-            map: self,
-            key: None,
-        }
-    }
-}
+//     pub fn iter<'a>(&'a self) -> MapIter<'a, '_, K, V> {
+//         MapIter {
+//             map: self,
+//             key: None,
+//         }
+//     }
+// }
 
 //解析elf文件
 pub fn parse(path: &str) -> Result<Module> {
@@ -409,9 +409,9 @@ pub fn parse(path: &str) -> Result<Module> {
     let shdr_relocs = &object.shdr_relocs;
     let mut version = 0u32;
     let mut license = String::new();
-    let mut maps = RSHashMap::new();
+    let mut maps: HashMap<String, Map> = HashMap::new();
     let mut rels = vec![];
-    let mut programs = RSHashMap::new();
+    let mut programs = HashMap::new();
     println!("parse");
     for (shndx, shdr) in object.section_headers.iter().enumerate() {
         let (kind, name) = get_split_section_name(&object, &shdr, shndx).unwrap(); //result
@@ -423,27 +423,27 @@ pub fn parse(path: &str) -> Result<Module> {
             (hdr::SHT_PROGBITS, Some("license"), _) => {
                 license = zero::read_str(content).to_string()
             }
-            (hdr::SHT_PROGBITS, Some(name), None)
-                if name == ".bss" || name.starts_with(".data") || name.starts_with(".rodata") =>
-            {
-                // load these as ARRAY maps containing one item: the section data. Then during
-                // relocation make instructions point inside the maps.
-                maps.insert(
-                    shndx,
-                    Map::with_section_data(
-                        name,
-                        content,
-                        if name.starts_with(".rodata") {
-                            bpf_sys::BPF_F_RDONLY_PROG
-                        } else {
-                            0
-                        },
-                    )?,
-                );
-            }
+            // (hdr::SHT_PROGBITS, Some(name), None)
+            //     if name == ".bss" || name.starts_with(".data") || name.starts_with(".rodata") =>
+            // {
+            //     // load these as ARRAY maps containing one item: the section data. Then during
+            //     // relocation make instructions point inside the maps.
+            //     maps.insert(
+            //         shndx,
+            //         Map::with_section_data(
+            //             name,
+            //             content,
+            //             if name.starts_with(".rodata") {
+            //                 bpf_sys::BPF_F_RDONLY_PROG
+            //             } else {
+            //                 0
+            //             },
+            //         )?,
+            //     );
+            // }
             (hdr::SHT_PROGBITS, Some("map"), Some(name)) => {
                 // Maps are immediately bcc_create_map'd
-                maps.insert(shndx, Map::load(name, &content)?);
+                maps.insert(name.to_string(), Map::load(name, &content)?);
             }
             (hdr::SHT_PROGBITS, Some(kind @ "kprobe"), Some(name))
             | (hdr::SHT_PROGBITS, Some(kind @ "kretprobe"), Some(name))
@@ -458,13 +458,13 @@ pub fn parse(path: &str) -> Result<Module> {
         println!("val is {},{:?},{:?}!", section_type, kind, name);
     }
 
-    for rel in rels.iter() {
-        if programs.contains_key(&rel.target_sec_idx) {
-            rel.apply(&mut programs, &maps, &symtab)?;
-        }
-    }
+    // for rel in rels.iter() {
+    //     if programs.contains_key(&rel.target_sec_idx) {
+    //         rel.apply(&mut programs, &maps, &symtab)?;
+    //     }
+    // }
     let programs = programs.drain().map(|(_, v)| v).collect();
-    let maps = maps.drain().map(|(_, v)| v).collect();
+    // let maps = maps.drain().map(|(_, v)| v).collect();
     Ok(Module {
         programs,
         maps,
@@ -502,8 +502,9 @@ impl RelocationInfo {
     #[inline]
     pub fn apply(
         &self,
-        programs: &mut RSHashMap<usize, Program>,
-        maps: &RSHashMap<usize, Map>,
+        object: &Elf,
+        programs: &mut HashMap<usize, Program>,
+        maps: &HashMap<String, Map>,
         symtab: &[Sym],
     ) -> Result<()> {
         // get the program we need to apply relocations to based on the program section index
@@ -511,7 +512,17 @@ impl RelocationInfo {
         // lookup the symbol we're relocating in the symbol table
         let sym = symtab[self.sym_idx];
         // get the map referenced by the program based on the symbol section index
-        let map = maps.get(&sym.st_shndx).ok_or(Error::Reloc)?;
+        let mapname = match object.strtab.get(sym.st_name) {
+            Some(Ok(mapname)) => mapname,
+            Some(Err(e)) => return Err(Error::Section(e.to_string())),
+            None => {
+                return Err(Error::Section(format!(
+                    "Section name not found: {}",
+                    sym.st_name
+                )))
+            }
+        };
+        let map = maps.get(mapname).ok_or(Error::Reloc)?;
 
         // the index of the instruction we need to patch
         let insn_idx = (self.offset / std::mem::size_of::<bpf_insn>() as u64) as usize;
