@@ -264,8 +264,22 @@ impl Map {
         Map::with_map_def(name, config)
     }
 
-    pub fn lookup(ikey :i32)->&[u8]{  
-
+    pub fn lookup(&self, mut id: libc::c_int) {
+        let mut value: MaybeUninit<libc::c_void> = MaybeUninit::uninit();
+        let a = unsafe {
+            bpf_sys::bpf_lookup_elem(
+                self.fd,
+                &mut id as *mut libc::c_int as _,
+                &mut value as *mut _ as *mut _,
+            )
+        };
+        println!("a:{}", a);
+        // let v: u64 = unsafe { value.assume_init() };
+        // println!("value:{}", v);
+        // if a < 0 {
+        //     return None;
+        // }
+        // Some(unsafe { value.assume_init() })
     }
 
     fn with_section_data(name: &str, data: &[u8], flags: u32) -> Result<Map> {
@@ -312,7 +326,7 @@ impl Map {
         if fd < 0 {
             return Err(Error::Map);
         }
-
+        println!("name {} ,map fd:{}", name, fd);
         Ok(Map {
             name: name.to_string(),
             kind: config.type_,
@@ -519,12 +533,7 @@ impl RelocationInfo {
         let mapname = match object.strtab.get(sym.st_name) {
             Some(Ok(mapname)) => mapname,
             Some(Err(e)) => return Err(Error::Section(e.to_string())),
-            None => {
-                return Err(Error::Section(format!(
-                    "name not found: {}",
-                    sym.st_name
-                )))
-            }
+            None => return Err(Error::Section(format!("name not found: {}", sym.st_name))),
         };
         println!("mapname:{}", mapname);
         let map = maps.get(mapname).ok_or(Error::Reloc)?;
