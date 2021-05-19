@@ -258,10 +258,10 @@ pub struct Map {
 //     _v: PhantomData<V>,
 // }
 // TODO Use PERF_MAX_STACK_DEPTH
-const BPF_MAX_STACK_DEPTH: usize = 127;
+const BPF_MAX_STACK_DEPTH: usize = 256;
 #[repr(C)]
 pub struct BpfStackFrames {
-    pub value: [u64; BPF_MAX_STACK_DEPTH],
+    pub value: [u8; BPF_MAX_STACK_DEPTH],
 }
 
 impl Map {
@@ -285,7 +285,7 @@ impl Map {
             panic!("looup panic")
         }
         let v: BpfStackFrames = unsafe { value.assume_init() };
-        println!("value:{:#x}", v.value);
+        println!("value:{:?}", v.value);
         //Some(unsafe { value.assume_init() })
     }
 
@@ -366,66 +366,6 @@ impl Module {
     }
 }
 
-// pub struct MapIter<'a, 'b, K: Clone, V: Clone> {
-//     map: &'a HashMap<'b, K, V>,
-//     key: Option<K>,
-// }
-
-// impl<'base, K: Clone, V: Clone> HashMap<'base, K, V> {
-//     pub fn new(base: &Map) -> Result<HashMap<K, V>> {
-//         if mem::size_of::<K>() != base.config.key_size as usize
-//             || mem::size_of::<V>() != base.config.value_size as usize
-//         {
-//             return Err(Error::Map);
-//         }
-
-//         Ok(HashMap {
-//             base,
-//             _k: PhantomData,
-//             _v: PhantomData,
-//         })
-//     }
-
-//     pub fn set(&self, mut key: K, mut value: V) {
-//         unsafe {
-//             bpf_sys::bpf_update_elem(
-//                 self.base.fd,
-//                 &mut key as *mut _ as *mut _,
-//                 &mut value as *mut _ as *mut _,
-//                 0,
-//             );
-//         }
-//     }
-
-//     pub fn get(&self, mut key: K) -> Option<V> {
-//         let mut value = MaybeUninit::zeroed();
-//         if unsafe {
-//             bpf_sys::bpf_lookup_elem(
-//                 self.base.fd,
-//                 &mut key as *mut _ as *mut _,
-//                 &mut value as *mut _ as *mut _,
-//             )
-//         } < 0
-//         {
-//             return None;
-//         }
-//         Some(unsafe { value.assume_init() })
-//     }
-
-//     pub fn delete(&self, mut key: K) {
-//         unsafe {
-//             bpf_sys::bpf_delete_elem(self.base.fd, &mut key as *mut _ as *mut _);
-//         }
-//     }
-
-//     pub fn iter<'a>(&'a self) -> MapIter<'a, '_, K, V> {
-//         MapIter {
-//             map: self,
-//             key: None,
-//         }
-//     }
-// }
-
 //解析elf文件
 pub fn parse(path: &str) -> Result<Module> {
     let bytes = fs::read(path)?; //使用 unwrap 隐式地错误处理。
@@ -448,24 +388,6 @@ pub fn parse(path: &str) -> Result<Module> {
             (hdr::SHT_PROGBITS, Some("license"), _) => {
                 license = zero::read_str(content).to_string()
             }
-            // (hdr::SHT_PROGBITS, Some(name), None)
-            //     if name == ".bss" || name.starts_with(".data") || name.starts_with(".rodata") =>
-            // {
-            //     // load these as ARRAY maps containing one item: the section data. Then during
-            //     // relocation make instructions point inside the maps.
-            //     maps.insert(
-            //         shndx,
-            //         Map::with_section_data(
-            //             name,
-            //             content,
-            //             if name.starts_with(".rodata") {
-            //                 bpf_sys::BPF_F_RDONLY_PROG
-            //             } else {
-            //                 0
-            //             },
-            //         )?,
-            //     );
-            // }
             (hdr::SHT_PROGBITS, Some("map"), Some(name)) => {
                 // Maps are immediately bcc_create_map'd
                 maps.insert(name.to_string(), Map::load(name, &content)?);
@@ -542,7 +464,7 @@ impl RelocationInfo {
             Some(Err(e)) => return Err(Error::Section(e.to_string())),
             None => return Err(Error::Section(format!("name not found: {}", sym.st_name))),
         };
-        println!("mapname:{}", mapname);
+        //println!("mapname:{}", mapname);
         let map = maps.get(mapname).ok_or(Error::Reloc)?;
 
         // the index of the instruction we need to patch
