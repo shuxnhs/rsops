@@ -257,6 +257,12 @@ pub struct Map {
 //     _k: PhantomData<K>,
 //     _v: PhantomData<V>,
 // }
+// TODO Use PERF_MAX_STACK_DEPTH
+const BPF_MAX_STACK_DEPTH: usize = 127;
+#[repr(C)]
+pub struct BpfStackFrames {
+    pub value: [u64; BPF_MAX_STACK_DEPTH],
+}
 
 impl Map {
     pub fn load(name: &str, code: &[u8]) -> Result<Map> {
@@ -265,21 +271,22 @@ impl Map {
     }
 
     pub fn lookup(&self, mut id: libc::c_int) {
-        let mut value: MaybeUninit<libc::c_void> = MaybeUninit::uninit();
+        let mut value: MaybeUninit<BpfStackFrames> = MaybeUninit::uninit();
         let a = unsafe {
             bpf_sys::bpf_lookup_elem(
                 self.fd,
                 &mut id as *mut libc::c_int as _,
-                &mut value as *mut _ as *mut _,
+                value.as_mut_ptr() as *mut _,
             )
         };
         println!("a:{}", a);
         // let v: u64 = unsafe { value.assume_init() };
-        // println!("value:{}", v);
-        // if a < 0 {
-        //     return None;
-        // }
-        // Some(unsafe { value.assume_init() })
+        if a < 0 {
+            panic!("looup panic")
+        }
+        let v: BpfStackFrames = unsafe { value.assume_init() };
+        println!("value:{:#x}", v.value);
+        //Some(unsafe { value.assume_init() })
     }
 
     fn with_section_data(name: &str, data: &[u8], flags: u32) -> Result<Map> {
