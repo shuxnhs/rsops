@@ -1,9 +1,13 @@
-use crate::module::symbols::*;
+pub use bpf_sys::uname;
+
+use crate::module::xdp;
 use bpf_sys::{
-    bpf_insn, bpf_map_def, bpf_probe_attach_type, bpf_probe_attach_type_BPF_PROBE_ENTRY,
-    bpf_probe_attach_type_BPF_PROBE_RETURN, bpf_prog_type, uname,
+    bpf_attach_type_BPF_SK_SKB_STREAM_PARSER, bpf_attach_type_BPF_SK_SKB_STREAM_VERDICT, bpf_insn,
+    bpf_map_def, bpf_map_info, bpf_map_type_BPF_MAP_TYPE_ARRAY,
+    bpf_map_type_BPF_MAP_TYPE_PERCPU_ARRAY, bpf_prog_type, BPF_ANY,
 };
 use goblin::elf::{reloc::RelocSection, section_header as hdr, Elf, SectionHeader, Sym};
+use libc::{self, pid_t};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
@@ -26,6 +30,7 @@ pub type MutDataPtr = *mut i8;
 
 #[derive(Debug)]
 pub enum Error {
+    System(i32),
     StringConversion,
     Section(String),
     Parse(::goblin::error::Error),
@@ -74,6 +79,11 @@ pub enum Program {
     XDP(XDP),
 }
 
+enum ProbeAttachType {
+    Entry,
+    Return,
+}
+
 impl Program {
     #[allow(clippy::unnecessary_wraps)]
     fn new(kind: &str, name: &str, code: &[u8]) -> Result<Program> {
@@ -89,19 +99,19 @@ impl Program {
         Ok(match kind {
             "kprobe" => Program::KProbe(KProbe {
                 common,
-                attach_type: bpf_probe_attach_type_BPF_PROBE_ENTRY,
+                attach_type: ProbeAttachType::Entry,
             }),
             "kretprobe" => Program::KProbe(KProbe {
                 common,
-                attach_type: bpf_probe_attach_type_BPF_PROBE_RETURN,
+                attach_type: ProbeAttachType::Return,
             }),
             "uprobe" => Program::UProbe(UProbe {
                 common,
-                attach_type: bpf_probe_attach_type_BPF_PROBE_ENTRY,
+                attach_type: ProbeAttachType::Entry,
             }),
             "uretprobe" => Program::UProbe(UProbe {
                 common,
-                attach_type: bpf_probe_attach_type_BPF_PROBE_RETURN,
+                attach_type: ProbeAttachType::Return,
             }),
             "tracepoint" => Program::TracePoint(TracePoint { common }),
             "socketfilter" => Program::SocketFilter(SocketFilter { common }),
@@ -164,29 +174,32 @@ impl Program {
         }
         let clicense = CString::new(license)?;
         let cname = CString::new(self.data_mut().name.clone())?;
-        let log_buffer: MutDataPtr =
-            unsafe { libc::malloc(mem::size_of::<i8>() * 16 * 65535) as MutDataPtr };
-        let buf_size = 64 * 65535_u32;
 
-        let fd = unsafe {
-            bpf_sys::bcc_prog_load(
-                self.to_prog_type(),
-                cname.as_ptr() as DataPtr,
-                self.data_mut().code.as_ptr(),
-                (self.data_mut().code.len() * mem::size_of::<bpf_insn>()) as i32,
-                clicense.as_ptr() as DataPtr,
-                kernel_version as u32,
-                0_i32,
-                log_buffer,
-                buf_size,
-            )
-        };
+        let mut attr = unsafe { mem::zeroed::<bpf_sys::bpf_load_program_attr>() };
 
-        if fd < 0 {
-            Err(Error::BPF)
-        } else {
-            self.data_mut().fd = Some(fd);
-            Ok(())
+        attr.prog_type = self.to_prog_type();
+        attr.expected_attach_type = 0;
+        attr.name = cname.as_ptr();
+        attr.insns = self.data().code.as_ptr();
+        attr.insns_cnt = self.data().code.len() as u64;
+        attr.license = clicense.as_ptr();
+        attr.__bindgen_anon_1.kern_version = kernel_version;
+        attr.log_level = 1;
+
+        unsafe {
+            let mut buf_vec = vec![0; 64 * 1024];
+            let log_buffer: MutDataPtr = buf_vec.as_mut_ptr();
+            let buf_size = buf_vec.capacity() * mem::size_of_val(&*log_buffer);
+            let fd = bpf_sys::bpf_load_program_xattr(&attr, log_buffer, buf_size as u64);
+            if fd < 0 {
+                //let cstr = CStr::from_ptr(log_buffer);
+                //error!("error loading BPF program {}", cstr.to_str().unwrap());
+                Err(Error::BPF)
+            } else {
+                // free should be called to prevent memory leakage
+                self.data_mut().fd = Some(fd);
+                Ok(())
+            }
         }
     }
 }
@@ -200,13 +213,13 @@ struct ProgramData {
 /// Type to work with `kprobes` or `kretprobes`.
 pub struct KProbe {
     common: ProgramData,
-    attach_type: bpf_probe_attach_type,
+    attach_type: ProbeAttachType,
 }
 
 /// Type to work with `uprobes` or `uretprobes`.
 pub struct UProbe {
     common: ProgramData,
-    attach_type: bpf_probe_attach_type,
+    attach_type: ProbeAttachType,
 }
 
 /// Type to work with `socket filters`.
@@ -217,16 +230,21 @@ pub struct SocketFilter {
 impl SocketFilter {
     pub fn attach_socket_filter(&mut self, interface: &str) -> Result<RawFd> {
         let fd = self.common.fd.ok_or(Error::ProgramNotLoaded)?;
-        let ciface = CString::new(interface).unwrap();
-        let sfd = unsafe { bpf_sys::bpf_open_raw_sock(ciface.as_ptr()) };
-
-        if sfd < 0 {
-            return Err(Error::IO(io::Error::last_os_error()));
-        }
-
-        match unsafe { bpf_sys::bpf_attach_socket(sfd, fd) } {
-            0 => Ok(sfd),
-            _ => Err(Error::IO(io::Error::last_os_error())),
+        unsafe {
+            let sfd = open_raw_sock(interface)?;
+            if libc::setsockopt(
+                sfd,
+                libc::SOL_SOCKET,
+                libc::SO_ATTACH_BPF,
+                &fd as *const _ as *const _,
+                mem::size_of_val(&fd) as u32,
+            ) < 0
+            {
+                libc::close(sfd);
+                Err(Error::IO(io::Error::last_os_error()))
+            } else {
+                Ok(sfd)
+            }
         }
     }
 
@@ -244,10 +262,42 @@ pub struct XDP {
     interfaces: Vec<String>,
 }
 
+impl XDP {
+    pub fn attach_xdp(&mut self, interface: &str, flags: xdp::Flags) -> Result<()> {
+        let fd = self.common.fd.ok_or(Error::ProgramNotLoaded)?;
+        self.interfaces.push(interface.to_string());
+        if let Err(e) = unsafe { attach_xdp(interface, fd, flags as u32) } {
+            // if let Error::IO(oserr) = e {
+            //     error!("error attaching xdp to interface {}: {}", interface, oserr);
+            // }
+            Err(Error::BPF)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn name(&self) -> String {
+        self.common.name.to_string()
+    }
+}
+
+unsafe fn attach_xdp(dev_name: &str, progfd: libc::c_int, flags: libc::c_uint) -> Result<()> {
+    let ciface = CString::new(dev_name).unwrap();
+    let ifindex = libc::if_nametoindex(ciface.as_ptr()) as i32;
+    if ifindex == 0 {
+        return Err(Error::IO(io::Error::last_os_error()));
+    }
+
+    if bpf_sys::bpf_set_link_xdp_fd(ifindex, progfd, flags) != 0 {
+        return Err(Error::IO(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 pub struct Map {
     pub name: String,
     pub kind: u32,
-    fd: RawFd,
+    pub fd: RawFd,
     config: bpf_map_def,
     section_data: bool,
 }
@@ -273,7 +323,7 @@ impl Map {
     pub fn lookup(&self, mut id: libc::c_int) {
         let mut value: MaybeUninit<BpfStackFrames> = MaybeUninit::uninit();
         let a = unsafe {
-            bpf_sys::bpf_lookup_elem(
+            bpf_sys::bpf_map_lookup_elem(
                 self.fd,
                 &mut id as *mut libc::c_int as _,
                 value.as_mut_ptr() as *mut _,
@@ -289,62 +339,86 @@ impl Map {
         //Some(unsafe { value.assume_init() })
     }
 
-    fn with_section_data(name: &str, data: &[u8], flags: u32) -> Result<Map> {
-        let mut map = Map::with_map_def(
-            name,
-            bpf_map_def {
-                type_: bpf_sys::bpf_map_type_BPF_MAP_TYPE_ARRAY,
-                key_size: mem::size_of::<u32>() as u32,
-                value_size: data.len() as u32,
-                max_entries: 1,
-                map_flags: flags,
-            },
-        )?;
-        map.section_data = true;
-        // for BSS we don't need to copy the data, it's already 0-initialized
-        if name != ".bss" {
-            unsafe {
-                let ret = bpf_sys::bpf_update_elem(
-                    map.fd,
-                    &mut 0 as *mut _ as *mut _,
-                    data.as_ptr() as *mut u8 as *mut _,
-                    0,
-                );
-                if ret < 0 {
-                    return Err(Error::BPF);
-                }
-            }
-        }
-        Ok(map)
-    }
+    // fn with_section_data(name: &str, data: &[u8], flags: u32) -> Result<Map> {
+    //     let mut map = Map::with_map_def(
+    //         name,
+    //         bpf_map_def {
+    //             type_: bpf_sys::bpf_map_type_BPF_MAP_TYPE_ARRAY,
+    //             key_size: mem::size_of::<u32>() as u32,
+    //             value_size: data.len() as u32,
+    //             max_entries: 1,
+    //             map_flags: flags,
+    //         },
+    //     )?;
+    //     map.section_data = true;
+    //     // for BSS we don't need to copy the data, it's already 0-initialized
+    //     if name != ".bss" {
+    //         unsafe {
+    //             let ret = bpf_sys::bpf_update_elem(
+    //                 map.fd,
+    //                 &mut 0 as *mut _ as *mut _,
+    //                 data.as_ptr() as *mut u8 as *mut _,
+    //                 0,
+    //             );
+    //             if ret < 0 {
+    //                 return Err(Error::BPF);
+    //             }
+    //         }
+    //     }
+    //     Ok(map)
+    // }
 
     fn with_map_def(name: &str, config: bpf_map_def) -> Result<Map> {
         let cname = CString::new(name)?;
         let fd = unsafe {
-            bpf_sys::bcc_create_map(
+            bpf_sys::bpf_create_map_name(
                 config.type_,
                 cname.as_ptr(),
                 config.key_size as i32,
                 config.value_size as i32,
                 config.max_entries as i32,
-                config.map_flags as i32,
+                config.map_flags as u32,
             )
         };
         if fd < 0 {
+            println!("create map fail {},{:?},{}", fd, cname, config.type_);
             return Err(Error::Map);
         }
-        println!("name {} ,map fd:{}", name, fd);
+
         Ok(Map {
             name: name.to_string(),
             kind: config.type_,
             fd,
             config,
             section_data: false,
+            //pin_file: None,
         })
     }
+
+    fn update() {}
 }
 
 impl Module {
+    pub fn xdps(&self) -> impl Iterator<Item = &XDP> {
+        use Program::*;
+        self.programs.iter().filter_map(|prog| match prog {
+            XDP(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    pub fn xdps_mut(&mut self) -> impl Iterator<Item = &mut XDP> {
+        use Program::*;
+        self.programs.iter_mut().filter_map(|prog| match prog {
+            XDP(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    pub fn xdp_mut(&mut self, name: &str) -> Option<&mut XDP> {
+        self.xdps_mut().find(|p| p.common.name == name)
+    }
+
     pub fn socket_filters(&self) -> impl Iterator<Item = &SocketFilter> {
         use Program::*;
         self.programs.iter().filter_map(|prog| match prog {
@@ -381,6 +455,7 @@ pub fn parse(path: &str) -> Result<Module> {
     for (shndx, shdr) in object.section_headers.iter().enumerate() {
         let (kind, name) = get_split_section_name(&object, &shdr, shndx).unwrap(); //result
         let section_type = shdr.sh_type;
+        println!("val is {},{:?},{:?}!", section_type, kind, name);
         let content = data(&bytes, &shdr);
         match (section_type, kind, name) {
             (hdr::SHT_REL, _, _) => add_relocation(&mut rels, shndx, &shdr, shdr_relocs),
@@ -402,7 +477,6 @@ pub fn parse(path: &str) -> Result<Module> {
             }
             _ => {}
         }
-        println!("val is {},{:?},{:?}!", section_type, kind, name);
     }
 
     for rel in rels.iter() {
@@ -511,4 +585,42 @@ fn get_version(bytes: &[u8]) -> u32 {
         0xFFFF_FFFE => uname::get_kernel_internal_version().unwrap(),
         _ => *version,
     }
+}
+
+unsafe fn open_raw_sock(name: &str) -> Result<RawFd> {
+    let sock = libc::socket(
+        libc::PF_PACKET,
+        libc::SOCK_RAW | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+        (libc::ETH_P_ALL as u16).to_be().into(),
+    );
+    if sock < 0 {
+        return Err(Error::IO(io::Error::last_os_error()));
+    }
+
+    // Do not bind on empty interface names
+    if name.is_empty() {
+        return Ok(sock);
+    }
+
+    let mut sll = mem::zeroed::<libc::sockaddr_ll>();
+    sll.sll_family = libc::AF_PACKET as u16;
+    let ciface = CString::new(name).unwrap();
+    sll.sll_ifindex = libc::if_nametoindex(ciface.as_ptr()) as i32;
+    if sll.sll_ifindex == 0 {
+        libc::close(sock);
+        return Err(Error::IO(io::Error::last_os_error()));
+    }
+
+    sll.sll_protocol = (libc::ETH_P_ALL as u16).to_be() as u16;
+    if libc::bind(
+        sock,
+        &sll as *const _ as *const _,
+        mem::size_of_val(&sll) as u32,
+    ) < 0
+    {
+        libc::close(sock);
+        return Err(Error::IO(io::Error::last_os_error()));
+    }
+
+    Ok(sock)
 }
